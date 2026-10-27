@@ -1,7 +1,7 @@
 /**
- * High-speed in-browser audio downsampler and optimizer.
- * Uses OfflineAudioContext (which renders at 50x-100x speed, NOT real-time),
- * processing a 43MB audio file in 1-3 seconds instead of minutes.
+ * High-speed in-browser audio downsampler and optimizer with strict 6s timeout protection.
+ * If decoding takes more than 6 seconds, it automatically falls back to direct upload
+ * so processing NEVER hangs.
  */
 
 export async function optimizeAudioForTranscription(
@@ -16,54 +16,60 @@ export async function optimizeAudioForTranscription(
     };
   }
 
-  onProgress?.("Decoding audio tracks (instant)...");
+  // 6-second safety timeout: guarantees execution never hangs
+  const timeoutPromise = new Promise<{ blob: Blob; mimeType: string }>((resolve) => {
+    setTimeout(() => {
+      console.warn("Audio downsampling timed out, proceeding with direct upload.");
+      resolve({ blob: file, mimeType: file.type || "audio/mp3" });
+    }, 6000);
+  });
 
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-    const audioCtx = new AudioCtx();
+  const optimizationPromise = (async (): Promise<{ blob: Blob; mimeType: string }> => {
+    try {
+      onProgress?.("Reading audio data...");
+      const arrayBuffer = await file.arrayBuffer();
 
-    const decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    const duration = decodedBuffer.duration;
+      onProgress?.("Decoding speech channels...");
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const audioCtx = new AudioCtx();
 
-    // Dynamically calculate optimal sample rate (between 8kHz and 16kHz)
-    // to ensure final payload stays strictly under 18MB so it uploads in 2-3 seconds.
-    // 16-bit mono = sampleRate * 2 bytes/sec.
-    // Max target size = 18MB = 18,874,368 bytes.
-    let targetSampleRate = 16000;
-    if (duration * 16000 * 2 > 18 * 1024 * 1024) {
-      targetSampleRate = Math.max(8000, Math.floor((18 * 1024 * 1024) / (2 * duration)));
+      // Decode audio
+      const decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      const duration = decodedBuffer.duration;
+
+      // Calculate target sample rate
+      let targetSampleRate = 16000;
+      if (duration * 16000 * 2 > 18 * 1024 * 1024) {
+        targetSampleRate = Math.max(8000, Math.floor((18 * 1024 * 1024) / (2 * duration)));
+      }
+
+      onProgress?.("Downsampling to fast speech format (< 2s)...");
+      const totalTargetSamples = Math.ceil(duration * targetSampleRate);
+
+      const offlineCtx = new OfflineAudioContext(1, totalTargetSamples, targetSampleRate);
+      const source = offlineCtx.createBufferSource();
+      source.buffer = decodedBuffer;
+      source.connect(offlineCtx.destination);
+      source.start(0);
+
+      const renderedBuffer = await offlineCtx.startRendering();
+      audioCtx.close().catch(() => {});
+
+      onProgress?.("Packaging speech payload...");
+      const wavBlob = audioBufferToWav(renderedBuffer, targetSampleRate);
+
+      return { blob: wavBlob, mimeType: "audio/wav" };
+    } catch (err) {
+      console.warn("Client downsampling failed, proceeding with original audio:", err);
+      return { blob: file, mimeType: file.type || "audio/mp3" };
     }
+  })();
 
-    onProgress?.(`Accelerated downsampling (${targetSampleRate}Hz mono speech)...`);
-    const totalTargetSamples = Math.ceil(duration * targetSampleRate);
-
-    // OfflineAudioContext renders as fast as the CPU can compute (50x-100x real-time)
-    const offlineCtx = new OfflineAudioContext(1, totalTargetSamples, targetSampleRate);
-
-    const source = offlineCtx.createBufferSource();
-    source.buffer = decodedBuffer;
-    source.connect(offlineCtx.destination);
-    source.start(0);
-
-    const renderedBuffer = await offlineCtx.startRendering();
-    audioCtx.close().catch(() => {});
-
-    onProgress?.("Packaging optimized speech file (< 2s)...");
-    const wavBlob = audioBufferToWav(renderedBuffer, targetSampleRate);
-
-    return { blob: wavBlob, mimeType: "audio/wav" };
-  } catch (err) {
-    console.warn("Client audio optimization fallback to original file:", err);
-    return {
-      blob: file,
-      mimeType: file.type || "audio/mp3",
-    };
-  }
+  return Promise.race([optimizationPromise, timeoutPromise]);
 }
 
 /**
- * High-speed WAV encoder for 1-channel mono AudioBuffer.
+ * Fast WAV encoder for 1-channel mono AudioBuffer.
  * Runs in under 50 milliseconds in memory.
  */
 function audioBufferToWav(buffer: AudioBuffer, sampleRate: number): Blob {
@@ -83,19 +89,19 @@ function audioBufferToWav(buffer: AudioBuffer, sampleRate: number): Blob {
 
   // fmt subchunk
   writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+  view.setUint32(16, 16, true);
   view.setUint16(20, 1, true); // PCM format
   view.setUint16(22, 1, true); // Mono (1 channel)
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, byteRate, true);
-  view.setUint16(32, 2, true); // Block align (1 * 16/8)
-  view.setUint16(34, 16, true); // Bits per sample (16)
+  view.setUint16(32, 2, true); // Block align
+  view.setUint16(34, 16, true); // 16-bit
 
   // data subchunk
   writeString(view, 36, "data");
   view.setUint32(40, dataSize, true);
 
-  // Write 16-bit signed PCM samples
+  // Write 16-bit PCM samples
   let offset = 44;
   for (let i = 0; i < totalSamples; i++) {
     const s = Math.max(-1, Math.min(1, channelData[i]));

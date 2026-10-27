@@ -294,10 +294,13 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
 
               <button
                 type="button"
-                onClick={() => setSelectedFile(null)}
-                disabled={isProcessing}
+                onClick={() => {
+                  setIsProcessing(false);
+                  setProcessingStep("");
+                  setSelectedFile(null);
+                }}
                 className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
-                title="Choose different file"
+                title="Cancel or choose different file"
               >
                 <RotateCcw className="w-4 h-4" />
               </button>
