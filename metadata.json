@@ -1,0 +1,6 @@
+{
+  "name": "VoxScribe AI - Multilingual Audio Transcriber & Real-Time Captioner",
+  "description": "High-accuracy multilingual audio transcription, automatic language detection, real-time live captioning, seamless translation, and accessible PDF export.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
